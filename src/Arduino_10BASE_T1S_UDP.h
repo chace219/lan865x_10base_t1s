@@ -19,8 +19,8 @@
 #include <vector>
 #include <memory>
 
-#include <Udp.h> // api/Udp.h
-#include <IPAddress.h> // api/IPAddress.h
+#include <api/Udp.h>
+#include <api/IPAddress.h>
 
 #include "lib/liblwip/include/lwip/udp.h"
 #include "lib/liblwip/include/lwip/ip_addr.h"
@@ -28,6 +28,8 @@
 #include "MacAddress.h"
 #include "T1SMacSettings.h"
 #include "T1SPlcaSettings.h"
+
+using arduino::IPAddress;
 
 /**************************************************************************************
  * CLASS DECLARATION
@@ -219,6 +221,9 @@ public:
    * @return uint16_t Returns the port number of the remote host.
    */
   virtual uint16_t remotePort() override;
+
+  bool joinMulticast(IPAddress const group_ip);
+  bool leaveMulticast(IPAddress const group_ip);
 
   /* This function MUST not be called from the user of this library,
    * it's used for internal purposes only.

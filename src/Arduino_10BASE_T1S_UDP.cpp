@@ -14,6 +14,10 @@
 
 #include "Arduino_10BASE_T1S_UDP.h"
 
+#if LWIP_IGMP
+#include "lib/liblwip/include/lwip/igmp.h"
+#endif
+
 /**************************************************************************************
  * MODULE INTERNAL FUNCTION DECLARATION
  **************************************************************************************/
@@ -216,6 +220,30 @@ uint16_t Arduino_10BASE_T1S_UDP::remotePort()
     return _rx_pkt->remotePort();
   else
     return 0;
+}
+
+bool Arduino_10BASE_T1S_UDP::joinMulticast(IPAddress const group_ip)
+{
+#if LWIP_IGMP
+  ip4_addr_t group;
+  IP4_ADDR(&group, group_ip[0], group_ip[1], group_ip[2], group_ip[3]);
+  return (igmp_joingroup(IP4_ADDR_ANY4, &group) == ERR_OK);
+#else
+  (void)group_ip;
+  return false;
+#endif
+}
+
+bool Arduino_10BASE_T1S_UDP::leaveMulticast(IPAddress const group_ip)
+{
+#if LWIP_IGMP
+  ip4_addr_t group;
+  IP4_ADDR(&group, group_ip[0], group_ip[1], group_ip[2], group_ip[3]);
+  return (igmp_leavegroup(IP4_ADDR_ANY4, &group) == ERR_OK);
+#else
+  (void)group_ip;
+  return false;
+#endif
 }
 
 void Arduino_10BASE_T1S_UDP::onUdpRawRecv(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, uint16_t port)
