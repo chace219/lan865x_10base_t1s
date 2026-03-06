@@ -38,6 +38,8 @@
 #ifndef LWIP_LWIPOPTS_H
 #define LWIP_LWIPOPTS_H
 
+#include <stdint.h>
+
 /**
  * NO_SYS==1: Provides VERY minimal functionality. Otherwise,
  * use lwIP facilities.
@@ -75,7 +77,7 @@
  * a lot of data that needs to be copied, this should be set high.
  */
 #ifndef MEM_SIZE
-#define MEM_SIZE                        0
+#define MEM_SIZE                        8192  /* heap for TCP send/recv buffers (bytes) */
 #endif
 
 
@@ -123,7 +125,7 @@
  * (requires the LWIP_TCP option)
  */
 #ifndef MEMP_NUM_TCP_PCB
-#define MEMP_NUM_TCP_PCB                0
+#define MEMP_NUM_TCP_PCB                4   /* max simultaneously active (connected) TCP sockets */
 #endif
 
 /**
@@ -131,7 +133,7 @@
  * (requires the LWIP_TCP option)
  */
 #ifndef MEMP_NUM_TCP_PCB_LISTEN
-#define MEMP_NUM_TCP_PCB_LISTEN         0
+#define MEMP_NUM_TCP_PCB_LISTEN         1   /* one listening server socket */
 #endif
 
 /**
@@ -139,7 +141,7 @@
  * (requires the LWIP_TCP option)
  */
 #ifndef MEMP_NUM_TCP_SEG
-#define MEMP_NUM_TCP_SEG                0
+#define MEMP_NUM_TCP_SEG                16  /* queued TCP segments across all connections */
 #endif
 
 /**
@@ -201,7 +203,7 @@
  * PBUF_POOL_SIZE: the number of buffers in the pbuf pool.
  */
 #ifndef PBUF_POOL_SIZE
-#define PBUF_POOL_SIZE                  1
+#define PBUF_POOL_SIZE                  8 // 1
 #endif
 
 /*
@@ -340,7 +342,7 @@
  * LWIP_DHCP==1: Enable DHCP module.
  */
 #ifndef LWIP_DHCP
-#define LWIP_DHCP                       0
+#define LWIP_DHCP                       1
 #endif
 
 /*
@@ -383,7 +385,7 @@
  * LWIP_IGMP==1: Turn on IGMP module.
  */
 #ifndef LWIP_IGMP
-#define LWIP_IGMP                       0
+#define LWIP_IGMP                       1
 #endif
 
 /*
@@ -434,7 +436,7 @@
  * LWIP_TCP==1: Turn on TCP.
  */
 #ifndef LWIP_TCP
-#define LWIP_TCP                        0
+#define LWIP_TCP                        1
 #endif
 
 /*
@@ -586,6 +588,15 @@
 extern unsigned char debug_flags;
 #define LWIP_DBG_TYPES_ON debug_flags
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+uint16_t t1s_lwip_htons(uint16_t x);
+uint32_t t1s_lwip_htonl(uint32_t x);
+#ifdef __cplusplus
+}
+#endif
+
 // Rename APIs / structs to avoid clashes
 #define sys_now t1s_sys_now
 #define etharp_cleanup_netif t1s_etharp_cleanup_netif
@@ -657,7 +668,23 @@ extern unsigned char debug_flags;
 #define netif_index_to_name t1s_netif_index_to_name
 #define netif_find t1s_netif_find
 #define netif_name_to_index t1s_netif_name_to_index
+#define netif_list t1s_netif_list
+#define netif_default t1s_netif_default
 #define pbuf_alloc_reference t1s_pbuf_alloc_reference
+#define pbuf_copy_partial_pbuf t1s_pbuf_copy_partial_pbuf
+#define udp_pcbs t1s_udp_pcbs
+#define lwip_htons t1s_lwip_htons
+#define lwip_htonl t1s_lwip_htonl
+#define ip4_set_default_multicast_netif t1s_ip4_set_default_multicast_netif
+#define ip4_output_if_opt_src t1s_ip4_output_if_opt_src
+#define ip4_output_if_opt t1s_ip4_output_if_opt
+#define memp_IGMP_GROUP t1s_memp_IGMP_GROUP
+#define memp_memory_PBUF_POOL_base t1s_memp_memory_PBUF_POOL_base
+#define memp_memory_PBUF_base t1s_memp_memory_PBUF_base
+#define memp_memory_SYS_TIMEOUT_base t1s_memp_memory_SYS_TIMEOUT_base
+#define memp_memory_IGMP_GROUP_base t1s_memp_memory_IGMP_GROUP_base
+#define memp_memory_UDP_PCB_base t1s_memp_memory_UDP_PCB_base
+#define memp_memory_RAW_PCB_base t1s_memp_memory_RAW_PCB_base
 #define pbuf_add_header t1s_pbuf_add_header
 #define pbuf_add_header_force t1s_pbuf_add_header_force
 #define pbuf_remove_header t1s_pbuf_remove_header
