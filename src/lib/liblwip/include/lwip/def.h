@@ -105,12 +105,18 @@ u32_t lwip_htonl(u32_t x);
 /* These macros should be calculated by the preprocessor and are used
    with compile-time constants only (so that there is no little-endian
    overhead at runtime). */
+#ifndef lwip_htons
+u16_t lwip_htons(u16_t x);
+#endif
 #define PP_HTONS(x) ((u16_t)((((x) & (u16_t)0x00ffU) << 8) | (((x) & (u16_t)0xff00U) >> 8)))
 #define PP_NTOHS(x) PP_HTONS(x)
 #define PP_HTONL(x) ((((x) & (u32_t)0x000000ffUL) << 24) | \
                      (((x) & (u32_t)0x0000ff00UL) <<  8) | \
                      (((x) & (u32_t)0x00ff0000UL) >>  8) | \
                      (((x) & (u32_t)0xff000000UL) >> 24))
+   #ifndef lwip_htonl
+   u32_t lwip_htonl(u32_t x);
+   #endif
 #define PP_NTOHL(x) PP_HTONL(x)
 #endif /* BYTE_ORDER == BIG_ENDIAN */
 
@@ -128,10 +134,8 @@ u32_t lwip_htonl(u32_t x);
  * in your application, too.
  */
 
-#ifndef lwip_itoa
 /* This can be #defined to itoa() or snprintf(result, bufsize, "%d", number) depending on your platform */
 void  lwip_itoa(char* result, size_t bufsize, int number);
-#endif
 #ifndef lwip_strnicmp
 /* This can be #defined to strnicmp() or strncasecmp() depending on your platform */
 int   lwip_strnicmp(const char* str1, const char* str2, size_t len);
