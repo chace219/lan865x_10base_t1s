@@ -110,18 +110,20 @@ int Arduino_10BASE_T1S_UDP::endPacket()
   /* Copy data from transmit buffer over. */
   err_t err = pbuf_take(p, _tx_data.data(), _tx_data.size());
   if (err != ERR_OK)
+  {
+    pbuf_free(p);
     return -1;
+  }
 
   /* Empty our transmit buffer. */
   _tx_data.clear();
 
   /* Send UDP packet. */
   err = udp_sendto(_udp_pcb, p, &ipaddr, _send_to_port);
+  /* Always free our reference — lwIP has ref'd its own copy if it needed one. */
+  pbuf_free(p);
   if (err != ERR_OK)
     return -1;
-
-  /* Free pbuf */
-  pbuf_free(p);
 
   return 1;
 }

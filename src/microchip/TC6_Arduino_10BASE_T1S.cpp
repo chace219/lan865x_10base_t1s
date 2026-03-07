@@ -284,7 +284,7 @@ static err_t lwIpInit(struct netif *netif)
   TC6LwIP_t *lw = GetContextNetif(netif);
   netif->output = etharp_output;
   netif->linkoutput = lwIpOut;
-  netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET;
+  netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP;
   netif->mtu = TC6LwIP_MTU;
   netif->hwaddr_len = ETHARP_HWADDR_LEN;
   (void) memcpy(netif->name, TC6LwIP_HOSTNAME, 2);
