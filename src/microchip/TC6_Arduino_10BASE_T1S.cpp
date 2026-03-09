@@ -355,23 +355,6 @@ static err_t lwIpOut(struct netif *netif, struct pbuf *p)
  * TC6 CALLBACKS
  **************************************************************************************/
 
-static bool FilterRxEthernetPacket(uint16_t ethType)
-{
-  bool tcpStack = false;
-  switch (ethType)
-  {
-    case 0x0800:
-      /* IPv4 */
-      tcpStack = true;
-      break;
-    case 0x0806:
-      /* ARP */
-      tcpStack = true;
-      break;
-  }
-  return tcpStack;
-}
-
 void TC6_CB_OnNeedService(TC6_t *pInst, void *pGlobalTag)
 {
   TC6LwIP_t *lw = TC6::GetContextTC6(pInst);
@@ -400,6 +383,20 @@ void TC6_CB_OnRxEthernetSlice(TC6_t *pInst, const uint8_t *pRx, uint16_t offset,
   bool success = true;
   (void)pInst;
   (void)pGlobalTag;
+
+  /* If this is the start of a new frame (offset==0) and a pbuf is already
+   * held from a previous interrupted frame, free it before proceeding.
+   * Without this, a reinit mid-frame leaves a permanently stuck pbuf that
+   * causes every subsequent RX frame to be written into the wrong buffer
+   * and eventually exhausts MEM_SIZE. */
+  if (offset == 0 && lw->tc.pbuf != NULL)
+  {
+    Serial.println("[TC6 RX] Stale pbuf detected at frame start — freeing");
+    pbuf_free(lw->tc.pbuf);
+    lw->tc.pbuf     = NULL;
+    lw->tc.rxLen    = 0;
+    lw->tc.rxInvalid = false;
+  }
 //  TC6_ASSERT(lw->tc.tc6 == pInst);
   if (lw->tc.rxInvalid) {
     success = false;
@@ -433,8 +430,6 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
 {
 #define MIN_HEADER_LEN  (42u)
   TC6LwIP_t *lw = TC6::GetContextTC6(pInst);
-  uint16_t ethType;
-  struct eth_hdr *ethhdr;
   (void) pInst;
   (void) rxTimestamp;
   (void) pGlobalTag;
@@ -456,89 +451,87 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
   }
   if (result)
   {
-//    TC6_ASSERT(lw->tc.pbuf);
-//    TC6_ASSERT(lw->tc.pbuf->ref != 0);
-    pbuf_realloc(lw->tc.pbuf, len); /* Shrink a pbuf chain to a desired length. */
-    ethhdr = (eth_hdr *) lw->tc.pbuf->payload;
-    ethType = htons(ethhdr->type);
-    if (FilterRxEthernetPacket(ethType))
-    {
-      /* Integrator decided that TCP/IP stack shall consume the received packet */
-      err_t result = lw->ip.netint.input(lw->tc.pbuf, &lw->ip.netint);
-      if (ERR_OK == result)
-      {
-        lw->tc.pbuf = NULL;
-        lw->tc.rxLen = 0;
-        lw->tc.rxInvalid = false;
-      } else
-      {
-//                PrintRateLimited("on_rx_eth_ready: IP input error", result);
-        result = false;
-      }
-    }
+    pbuf_realloc(lw->tc.pbuf, len); /* Shrink pbuf to actual received length. */
+
+    /* Pass the frame to lwIP's ethernet_input() unconditionally.
+     *
+     * WHY WE REMOVED FilterRxEthernetPacket:
+     * ethernet_input() already handles every EtherType internally:
+     *   - IPv4 / ARP  → passed to ip4_input() / etharp_input()
+     *   - unknown     → goto free_and_return → pbuf_free(p) + ERR_OK
+     * Filtering here just caused pbuf leaks for unrecognised frames
+     * (the old `else` branch skipped the cleanup block).
+     *
+     * WHY WE NEVER CALL pbuf_free AFTER input():
+     * ethernet_input() ALWAYS returns ERR_OK (every code path either
+     * consumes the pbuf or calls pbuf_free internally before returning).
+     * Calling pbuf_free again after input() is always a double-free and
+     * corrupts the lwIP memp pool, crashing the stack within minutes.
+     *
+     * The original FIXME "SOMETHING FISHY GOING ON" was exactly this. */
+    lw->ip.netint.input(lw->tc.pbuf, &lw->ip.netint);
+
+    /* lwIP owns the pbuf now — clear our pointer. */
+    lw->tc.pbuf     = NULL;
+    lw->tc.rxLen    = 0;
+    lw->tc.rxInvalid = false;
   }
   if (!result)
   {
+    /* Early-reject path (bad flags, size mismatch, etc.).
+     * lwIP never received this pbuf, so we must free it ourselves. */
     if (NULL != lw->tc.pbuf)
     {
-//      TC6_ASSERT(NULL != lw->tc.pbuf);
-//      pbuf_free(lw->tc.pbuf); // FIXME: SOMETHING FISHY GOING ON !!!
+      pbuf_free(lw->tc.pbuf);
       lw->tc.pbuf = NULL;
     }
-    lw->tc.rxLen = 0;
+    lw->tc.rxLen    = 0;
     lw->tc.rxInvalid = false;
   }
 }
 
 #define PRINT(...)
 
+/* Reinit counter — incremented every time TC6Regs_Reinit() is triggered.
+ * Visible in the [MEM] diagnostic line in main.cpp. */
+uint32_t g_tc6_reinit_count = 0;
+
 void TC6_CB_OnError(TC6_t *pInst, TC6_Error_t err, void *pGlobalTag)
 {
   bool reinit = false;
   switch (err)
   {
-    case TC6Error_Succeeded:
-      PRINT(ESC_GREEN "No error occurred" ESC_RESETCOLOR "\r\n");
-      break;
+    case TC6Error_Succeeded:        /* normal, no print */ break;
     case TC6Error_NoHardware:
-      PRINT(ESC_RED "MISO data implies that there is no MACPHY hardware available" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 ERR] NoHardware — MACPHY not responding");
+      reinit = true; break;
     case TC6Error_UnexpectedSv:
-      PRINT(ESC_RED " Unexpected Start Valid Flag" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 ERR] UnexpectedStartValid"); break;
     case TC6Error_UnexpectedDvEv:
-      PRINT(ESC_RED "Unexpected Data Valid or End Valid Flag" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 ERR] UnexpectedDataValid/EndValid"); break;
     case TC6Error_BadChecksum:
-      PRINT(ESC_RED "Checksum in footer is wrong" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 ERR] BadChecksum");
+      reinit = true; break;
     case TC6Error_UnexpectedCtrl:
-      PRINT(ESC_RED "Unexpected control packet received" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 ERR] UnexpectedCtrlPacket");
+      reinit = true; break;
     case TC6Error_BadTxData:
-      PRINT(ESC_RED "Header Bad Flag received" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 ERR] BadTxData (Header Bad Flag)");
+      reinit = true; break;
     case TC6Error_SyncLost:
-      PRINT(ESC_RED "Sync Flag is no longer set" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 ERR] SyncLost — reinitialising");
+      reinit = true; break;
     case TC6Error_SpiError:
-      PRINT(ESC_RED "TC6 SPI Error" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 ERR] SpiError — reinitialising");
+      reinit = true; break;
     case TC6Error_ControlTxFail:
-      PRINT(ESC_RED "TC6 Control Message Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 ERR] ControlTxFail"); break;
     default:
-      PRINT(ESC_RED "Unknown TC6 error occurred" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 ERR] Unknown error"); break;
   }
   if (reinit)
   {
+    g_tc6_reinit_count++;
     TC6Regs_Reinit(pInst);
   }
 }
@@ -549,119 +542,51 @@ void TC6Regs_CB_OnEvent(TC6_t *pInst, TC6Regs_Event_t event, void *pTag)
   switch (event)
   {
     case TC6Regs_Event_UnknownError:
-      PRINT(ESC_RED "UnknownError" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] UnknownError"); break;
     case TC6Regs_Event_Transmit_Protocol_Error:
-      PRINT(ESC_RED "Transmit_Protocol_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] Transmit_Protocol_Error"); break;
     case TC6Regs_Event_Transmit_Buffer_Overflow_Error:
-      PRINT(ESC_RED "Transmit_Buffer_Overflow_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] TX_Buffer_Overflow"); break;
     case TC6Regs_Event_Transmit_Buffer_Underflow_Error:
-      PRINT(ESC_RED "Transmit_Buffer_Underflow_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] TX_Buffer_Underflow"); break;
     case TC6Regs_Event_Receive_Buffer_Overflow_Error:
-      PRINT(ESC_RED "Receive_Buffer_Overflow_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] RX_Buffer_Overflow"); break;
     case TC6Regs_Event_Loss_of_Framing_Error:
-      PRINT(ESC_RED "Loss_of_Framing_Error" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 EVT] Loss_of_Framing — reinitialising");
+      reinit = true; break;
     case TC6Regs_Event_Header_Error:
-      PRINT(ESC_RED "Header_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] Header_Error"); break;
     case TC6Regs_Event_Reset_Complete:
-      PRINT(ESC_GREEN "Reset_Complete" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] Reset_Complete"); break;
     case TC6Regs_Event_PHY_Interrupt:
-      PRINT(ESC_GREEN "PHY_Interrupt" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_Transmit_Timestamp_Capture_Available_A:
-      PRINT(ESC_GREEN "Transmit_Timestamp_Capture_Available_A" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_Transmit_Timestamp_Capture_Available_B:
-      PRINT(ESC_GREEN "Transmit_Timestamp_Capture_Available_B" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_Transmit_Timestamp_Capture_Available_C:
-      PRINT(ESC_GREEN "Transmit_Timestamp_Capture_Available_C" ESC_RESETCOLOR "\r\n");
-      break;
+      /* frequent — omit to avoid flooding serial */ break;
     case TC6Regs_Event_Transmit_Frame_Check_Sequence_Error:
-      PRINT(ESC_RED "Transmit_Frame_Check_Sequence_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] TX_FCS_Error"); break;
     case TC6Regs_Event_Control_Data_Protection_Error:
-      PRINT(ESC_RED "Control_Data_Protection_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] Control_Data_Protection_Error"); break;
     case TC6Regs_Event_RX_Non_Recoverable_Error:
-      PRINT(ESC_RED "RX_Non_Recoverable_Error" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 EVT] RX_Non_Recoverable — reinitialising");
+      reinit = true; break;
     case TC6Regs_Event_TX_Non_Recoverable_Error:
-      PRINT(ESC_RED "TX_Non_Recoverable_Error" ESC_RESETCOLOR "\r\n");
-      reinit = true;
-      break;
+      Serial.println("[TC6 EVT] TX_Non_Recoverable — reinitialising");
+      reinit = true; break;
     case TC6Regs_Event_FSM_State_Error:
-      PRINT(ESC_RED "FSM_State_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] FSM_State_Error"); break;
     case TC6Regs_Event_SRAM_ECC_Error:
-      PRINT(ESC_RED "SRAM_ECC_Error" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] SRAM_ECC_Error"); break;
     case TC6Regs_Event_Undervoltage:
-      PRINT(ESC_RED "Undervoltage" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] UNDERVOLTAGE — check power supply!"); break;
     case TC6Regs_Event_Internal_Bus_Error:
-      PRINT(ESC_RED "Internal_Bus_Error" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_TX_Timestamp_Capture_Overflow_A:
-      PRINT(ESC_RED "TX_Timestamp_Capture_Overflow_A" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_TX_Timestamp_Capture_Overflow_B:
-      PRINT(ESC_RED "TX_Timestamp_Capture_Overflow_B" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_TX_Timestamp_Capture_Overflow_C:
-      PRINT(ESC_RED "TX_Timestamp_Capture_Overflow_C" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_TX_Timestamp_Capture_Missed_A:
-      PRINT(ESC_RED "TX_Timestamp_Capture_Missed_A" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_TX_Timestamp_Capture_Missed_B:
-      PRINT(ESC_RED "TX_Timestamp_Capture_Missed_B" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_TX_Timestamp_Capture_Missed_C:
-      PRINT(ESC_RED "TX_Timestamp_Capture_Missed_C" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_MCLK_GEN_Status:
-      PRINT(ESC_YELLOW "MCLK_GEN_Status" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_gPTP_PA_TS_EG_Status:
-      PRINT(ESC_YELLOW "gPTP_PA_TS_EG_Status" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_Extended_Block_Status:
-      PRINT(ESC_YELLOW "Extended_Block_Status" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_SPI_Err_Int:
-      PRINT(ESC_YELLOW "SPI_Err_Int" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_MAC_BMGR_Int:
-      PRINT(ESC_YELLOW "MAC_BMGR_Int" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_MAC_Int:
-      PRINT(ESC_YELLOW "MAC_Int" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_HMX_Int:
-      PRINT(ESC_YELLOW "HMX_Int" ESC_RESETCOLOR "\r\n");
-      break;
-    case TC6Regs_Event_GINT_Mask:
-      PRINT(ESC_YELLOW "GINT_Mask" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] Internal_Bus_Error"); break;
     case TC6Regs_Event_Chip_Error:
-      PRINT(ESC_RED "PHY is not trimmed" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] Chip_Error — PHY not trimmed"); break;
     case TC6Regs_Event_Unsupported_Hardware:
-      PRINT(ESC_RED "Unsupported hardware" ESC_RESETCOLOR "\r\n");
-      break;
+      Serial.println("[TC6 EVT] Unsupported_Hardware"); break;
+    default: break;
   }
   if (reinit)
   {
+    g_tc6_reinit_count++;
     TC6Regs_Reinit(pInst);
   }
 }
