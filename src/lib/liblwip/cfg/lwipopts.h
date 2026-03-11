@@ -131,9 +131,11 @@
 /**
  * MEMP_NUM_TCP_PCB_LISTEN: the number of listening TCP connections.
  * (requires the LWIP_TCP option)
+ * Increased to 2: one for the HTTP server (port 80) and one for the
+ * EtherNet/IP stack (port 44818).
  */
 #ifndef MEMP_NUM_TCP_PCB_LISTEN
-#define MEMP_NUM_TCP_PCB_LISTEN         1   /* one listening server socket */
+#define MEMP_NUM_TCP_PCB_LISTEN         2   /* HTTP (80) + EIP (44818) */
 #endif
 
 /**
