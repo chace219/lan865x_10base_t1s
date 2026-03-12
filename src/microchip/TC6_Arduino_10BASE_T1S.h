@@ -139,6 +139,15 @@ public:
    */
   bool sendWouldBlock();
 
+  /**
+   * @brief Returns a pointer to the underlying lwIP netif structure.
+   *
+   * Needed for direct lwIP calls such as dhcp_start().
+   *
+   * @return Pointer to the lwIP netif struct used by this interface.
+   */
+  struct netif* getNetif() { return &_lw.ip.netint; }
+
 private:
   TC6_Io & _tc6_io;
   TC6LwIP_t _lw;

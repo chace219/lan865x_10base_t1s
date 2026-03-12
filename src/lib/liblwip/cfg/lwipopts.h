@@ -38,6 +38,8 @@
 #ifndef LWIP_LWIPOPTS_H
 #define LWIP_LWIPOPTS_H
 
+#include <stdint.h>
+
 /**
  * NO_SYS==1: Provides VERY minimal functionality. Otherwise,
  * use lwIP facilities.
@@ -75,7 +77,7 @@
  * a lot of data that needs to be copied, this should be set high.
  */
 #ifndef MEM_SIZE
-#define MEM_SIZE                        0
+#define MEM_SIZE                        8192  /* heap for TCP send/recv buffers (bytes) */
 #endif
 
 
@@ -123,15 +125,17 @@
  * (requires the LWIP_TCP option)
  */
 #ifndef MEMP_NUM_TCP_PCB
-#define MEMP_NUM_TCP_PCB                0
+#define MEMP_NUM_TCP_PCB                4   /* max simultaneously active (connected) TCP sockets */
 #endif
 
 /**
  * MEMP_NUM_TCP_PCB_LISTEN: the number of listening TCP connections.
  * (requires the LWIP_TCP option)
+ * Increased to 2: one for the HTTP server (port 80) and one for the
+ * EtherNet/IP stack (port 44818).
  */
 #ifndef MEMP_NUM_TCP_PCB_LISTEN
-#define MEMP_NUM_TCP_PCB_LISTEN         0
+#define MEMP_NUM_TCP_PCB_LISTEN         2   /* HTTP (80) + EIP (44818) */
 #endif
 
 /**
@@ -139,7 +143,7 @@
  * (requires the LWIP_TCP option)
  */
 #ifndef MEMP_NUM_TCP_SEG
-#define MEMP_NUM_TCP_SEG                0
+#define MEMP_NUM_TCP_SEG                16  /* queued TCP segments across all connections */
 #endif
 
 /**
@@ -201,7 +205,13 @@
  * PBUF_POOL_SIZE: the number of buffers in the pbuf pool.
  */
 #ifndef PBUF_POOL_SIZE
-#define PBUF_POOL_SIZE                  1
+/* UNO R4 Minima has 32 KB RAM total.  Each PBUF_POOL slot occupies
+ * sizeof(struct pbuf) + PBUF_POOL_BUFSIZE ≈ 612 bytes of STATIC BSS.
+ * 24 slots = ~14.5 KB static — overflows RAM at link time.
+ * The RX path uses pbuf_alloc(PBUF_RAW, 1536, PBUF_RAM) which draws
+ * from the system heap, NOT this pool, so a large pool gives no benefit.
+ * 8 slots (≈4.9 KB) is sufficient for lwIP internal small-packet use. */
+#define PBUF_POOL_SIZE                  8
 #endif
 
 /*
@@ -340,7 +350,7 @@
  * LWIP_DHCP==1: Enable DHCP module.
  */
 #ifndef LWIP_DHCP
-#define LWIP_DHCP                       0
+#define LWIP_DHCP                       1
 #endif
 
 /*
@@ -383,7 +393,7 @@
  * LWIP_IGMP==1: Turn on IGMP module.
  */
 #ifndef LWIP_IGMP
-#define LWIP_IGMP                       0
+#define LWIP_IGMP                       1
 #endif
 
 /*
@@ -434,7 +444,7 @@
  * LWIP_TCP==1: Turn on TCP.
  */
 #ifndef LWIP_TCP
-#define LWIP_TCP                        0
+#define LWIP_TCP                        1
 #endif
 
 /*
@@ -586,6 +596,15 @@
 extern unsigned char debug_flags;
 #define LWIP_DBG_TYPES_ON debug_flags
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+uint16_t t1s_lwip_htons(uint16_t x);
+uint32_t t1s_lwip_htonl(uint32_t x);
+#ifdef __cplusplus
+}
+#endif
+
 // Rename APIs / structs to avoid clashes
 #define sys_now t1s_sys_now
 #define etharp_cleanup_netif t1s_etharp_cleanup_netif
@@ -657,7 +676,23 @@ extern unsigned char debug_flags;
 #define netif_index_to_name t1s_netif_index_to_name
 #define netif_find t1s_netif_find
 #define netif_name_to_index t1s_netif_name_to_index
+#define netif_list t1s_netif_list
+#define netif_default t1s_netif_default
 #define pbuf_alloc_reference t1s_pbuf_alloc_reference
+#define pbuf_copy_partial_pbuf t1s_pbuf_copy_partial_pbuf
+#define udp_pcbs t1s_udp_pcbs
+#define lwip_htons t1s_lwip_htons
+#define lwip_htonl t1s_lwip_htonl
+#define ip4_set_default_multicast_netif t1s_ip4_set_default_multicast_netif
+#define ip4_output_if_opt_src t1s_ip4_output_if_opt_src
+#define ip4_output_if_opt t1s_ip4_output_if_opt
+#define memp_IGMP_GROUP t1s_memp_IGMP_GROUP
+#define memp_memory_PBUF_POOL_base t1s_memp_memory_PBUF_POOL_base
+#define memp_memory_PBUF_base t1s_memp_memory_PBUF_base
+#define memp_memory_SYS_TIMEOUT_base t1s_memp_memory_SYS_TIMEOUT_base
+#define memp_memory_IGMP_GROUP_base t1s_memp_memory_IGMP_GROUP_base
+#define memp_memory_UDP_PCB_base t1s_memp_memory_UDP_PCB_base
+#define memp_memory_RAW_PCB_base t1s_memp_memory_RAW_PCB_base
 #define pbuf_add_header t1s_pbuf_add_header
 #define pbuf_add_header_force t1s_pbuf_add_header_force
 #define pbuf_remove_header t1s_pbuf_remove_header
@@ -740,5 +775,57 @@ extern unsigned char debug_flags;
 #define raw_new t1s_raw_new
 #define raw_new_ip_type t1s_raw_new_ip_type
 #define raw_netif_ip_addr_changed t1s_raw_netif_ip_addr_changed
+
+/* ---- TCP memory pools ---- */
+#define memp_TCP_PCB                         t1s_memp_TCP_PCB
+#define memp_TCP_PCB_LISTEN                  t1s_memp_TCP_PCB_LISTEN
+#define memp_TCP_SEG                         t1s_memp_TCP_SEG
+#define memp_memory_TCP_PCB_base             t1s_memp_memory_TCP_PCB_base
+#define memp_memory_TCP_PCB_LISTEN_base      t1s_memp_memory_TCP_PCB_LISTEN_base
+#define memp_memory_TCP_SEG_base             t1s_memp_memory_TCP_SEG_base
+
+/* ---- TCP global PCB lists ---- */
+#define tcp_active_pcbs                      t1s_tcp_active_pcbs
+#define tcp_tw_pcbs                          t1s_tcp_tw_pcbs
+#define tcp_listen_pcbs                      t1s_tcp_listen_pcbs
+#define tcp_bound_pcbs                       t1s_tcp_bound_pcbs
+
+/* ---- TCP functions (raw API) ---- */
+#define tcp_init                             t1s_tcp_init
+#define tcp_input                            t1s_tcp_input
+#define tcp_new                              t1s_tcp_new
+#define tcp_new_ip_type                      t1s_tcp_new_ip_type
+#define tcp_arg                              t1s_tcp_arg
+#define tcp_recv                             t1s_tcp_recv
+#define tcp_sent                             t1s_tcp_sent
+#define tcp_err                              t1s_tcp_err
+#define tcp_accept                           t1s_tcp_accept
+#define tcp_poll                             t1s_tcp_poll
+#define tcp_recved                           t1s_tcp_recved
+#define tcp_bind                             t1s_tcp_bind
+#define tcp_bind_netif                       t1s_tcp_bind_netif
+#define tcp_connect                          t1s_tcp_connect
+#define tcp_listen_with_backlog              t1s_tcp_listen_with_backlog
+#define tcp_listen_with_backlog_and_err      t1s_tcp_listen_with_backlog_and_err
+#define tcp_abort                            t1s_tcp_abort
+#define tcp_close                            t1s_tcp_close
+#define tcp_shutdown                         t1s_tcp_shutdown
+#define tcp_write                            t1s_tcp_write
+#define tcp_setprio                          t1s_tcp_setprio
+#define tcp_output                           t1s_tcp_output
+#define tcp_tcp_get_tcp_addrinfo             t1s_tcp_tcp_get_tcp_addrinfo
+#define tcp_trigger_input_pcb_close          t1s_tcp_trigger_input_pcb_close
+#define tcp_netif_ip_addr_changed            t1s_tcp_netif_ip_addr_changed
+#define tcp_backlog_delayed                  t1s_tcp_backlog_delayed
+#define tcp_backlog_accepted                 t1s_tcp_backlog_accepted
+
+/* ---- DHCP functions ---- */
+#define dhcp_start                           t1s_dhcp_start
+#define dhcp_stop                            t1s_dhcp_stop
+#define dhcp_supplied_address                t1s_dhcp_supplied_address
+#define dhcp_coarse_tmr                      t1s_dhcp_coarse_tmr
+#define dhcp_fine_tmr                        t1s_dhcp_fine_tmr
+#define memp_DHCP                            t1s_memp_DHCP
+#define memp_memory_DHCP_base                t1s_memp_memory_DHCP_base
 
 #endif /* LWIP_LWIPOPTS_H */

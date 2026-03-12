@@ -16,6 +16,7 @@
 
 #include "Arduino_10BASE_T1S_PHY_Interface.h"
 #include "Arduino_10BASE_T1S_UDP.h"
+#include "Arduino_10BASE_T1S_HTTP.h"
 
 #include "microchip/TC6_Arduino_10BASE_T1S.h"
 
@@ -26,6 +27,7 @@
 #include "lib/liblwip/include/lwip/mem.h"
 #include "lib/liblwip/include/lwip/memp.h"
 #include "lib/liblwip/include/lwip/udp.h"
+#include "lib/liblwip/include/lwip/tcp.h"
 
 /**************************************************************************************
  * CONSTANTS

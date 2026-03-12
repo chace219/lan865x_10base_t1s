@@ -33,3 +33,24 @@ extern "C" u32_t sys_now(void)
 {
   return millis();
 }
+
+extern "C" void t1s_lwip_itoa(char * result, size_t bufsize, int number)
+{
+  if ((result == nullptr) || (bufsize == 0))
+    return;
+
+  snprintf(result, bufsize, "%d", number);
+}
+
+extern "C" u16_t t1s_lwip_htons(u16_t x)
+{
+  return (u16_t)((x << 8) | (x >> 8));
+}
+
+extern "C" u32_t t1s_lwip_htonl(u32_t x)
+{
+  return ((x & 0x000000FFUL) << 24)
+       | ((x & 0x0000FF00UL) << 8)
+       | ((x & 0x00FF0000UL) >> 8)
+       | ((x & 0xFF000000UL) >> 24);
+}
