@@ -34,11 +34,26 @@
 
 typedef void (*TC6LwIP_On_PlcaStatus)(bool success, bool plcaStatus);
 
+/**
+ * @brief Callback type for the raw-frame receive tap.
+ *
+ * Called for every Ethernet frame received from the MAC-PHY, before the
+ * frame is passed to lwIP.  The frame buffer is valid only for the duration
+ * of the callback; copy any data you wish to retain.
+ *
+ * @param frame    Pointer to the start of the Ethernet frame (dest MAC).
+ * @param length   Total frame length in bytes.
+ * @param userdata Opaque pointer supplied at registration time.
+ */
+typedef void (*TC6_RawRxCallback_t)(uint8_t const * frame, uint16_t length, void * userdata);
+
 typedef struct
 {
   TC6_t *tc6;
   struct pbuf *pbuf;
   TC6LwIP_On_PlcaStatus pStatusCallback;
+  TC6_RawRxCallback_t rawRxCallback;
+  void *              rawRxCallbackTag;
   uint16_t rxLen;
   bool rxInvalid;
   bool tc6NeedService;
@@ -142,6 +157,32 @@ public:
    * @return bool Returns true if sending data would block, false otherwise.
    */
   bool sendWouldBlock();
+
+  /**
+   * @brief Sends one complete raw Ethernet frame through the MAC-PHY.
+   *
+   * Frame data must include destination/source MAC and EtherType.
+   * FCS is handled by the MAC-PHY.
+   *
+   * @param frame Pointer to Ethernet frame bytes.
+   * @param length Frame length in bytes.
+   * @return true if queued for transmission, false otherwise.
+   */
+  bool sendRawEthernetFrame(uint8_t const * frame, uint16_t length);
+
+  /**
+   * @brief Registers a receive-tap callback invoked for every raw Ethernet
+   *        frame arriving from the MAC-PHY, before it is handed to lwIP.
+   *
+   * Use this to intercept frames with EtherTypes that lwIP does not handle
+   * (e.g. 0x88CC LLDP).  The callback is a "tap" — lwIP also receives the
+   * frame regardless of the callback's actions.
+   *
+   * @param callback  Function called with (frame, length, userdata) for each
+   *                  received frame.  Pass nullptr to deregister.
+   * @param userdata  Opaque pointer forwarded to the callback unchanged.
+   */
+  void setRawRxCallback(TC6_RawRxCallback_t callback, void * userdata = nullptr);
 
   /**
    * @brief Returns a pointer to the underlying lwIP netif structure.

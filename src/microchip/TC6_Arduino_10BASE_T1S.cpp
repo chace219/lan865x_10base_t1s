@@ -272,6 +272,21 @@ bool TC6_Arduino_10BASE_T1S::sendWouldBlock()
   return wouldBlock;
 }
 
+bool TC6_Arduino_10BASE_T1S::sendRawEthernetFrame(uint8_t const * frame, uint16_t length)
+{
+  if ((frame == nullptr) || (length == 0u) || (_lw.tc.tc6 == nullptr))
+    return false;
+
+  /* TSC=0 means no egress timestamp capture for this frame. */
+  return TC6_SendRawEthernetPacket(_lw.tc.tc6, frame, length, 0u, nullptr, nullptr);
+}
+
+void TC6_Arduino_10BASE_T1S::setRawRxCallback(TC6_RawRxCallback_t callback, void * userdata)
+{
+  _lw.tc.rawRxCallback    = callback;
+  _lw.tc.rawRxCallbackTag = userdata;
+}
+
 void TC6_Arduino_10BASE_T1S::digitalWrite_A0(bool const value)
 {
   static bool is_dio_a0_enabled = false;
@@ -483,6 +498,17 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
   if (result)
   {
     pbuf_realloc(lw->tc.pbuf, len); /* Shrink pbuf to actual received length. */
+
+    /* Invoke the application RX tap (e.g. LLDP) before handing to lwIP.
+     * The pbuf payload is a flat buffer pointing at the raw Ethernet frame.
+     * lwIP will receive the frame regardless — the tap is read-only. */
+    if (lw->tc.rawRxCallback != nullptr)
+    {
+      lw->tc.rawRxCallback(
+        static_cast<uint8_t const *>(lw->tc.pbuf->payload),
+        len,
+        lw->tc.rawRxCallbackTag);
+    }
 
     /* Pass the frame to lwIP's ethernet_input() unconditionally.
      *
