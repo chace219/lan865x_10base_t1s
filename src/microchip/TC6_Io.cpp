@@ -25,7 +25,7 @@ namespace TC6
  * CONSTANTS
  **************************************************************************************/
 
-static SPISettings const LAN865x_SPI_SETTING{24 * 1000 * 1000UL, MSBFIRST, SPI_MODE0};
+static SPISettings const LAN865x_SPI_SETTING{16 * 1000 * 1000UL, MSBFIRST, SPI_MODE0};
 
 /**************************************************************************************
  * STATIC MEMBER DEFINITION
