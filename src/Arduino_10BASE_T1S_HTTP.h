@@ -32,7 +32,7 @@
  **************************************************************************************/
 
 /** Maximum number of registered route handlers. */
-#define HTTP_SERVER_MAX_ROUTES      8
+#define HTTP_SERVER_MAX_ROUTES      32
 
 /** Maximum number of registered upload handlers (POST streaming). */
 #define HTTP_SERVER_MAX_UPLOAD_ROUTES 4
@@ -49,10 +49,10 @@
 
 /** Response body buffer (bytes).
  *  Must be large enough for the longest handler response.
- *  The OTA update form HTML + minified JS is ~450 bytes; 1536 gives comfortable
- *  headroom for any user-added pages without wasting significant heap space
- *  (the buffer is static inside handleRequest, not on the stack). */
-#define HTTP_SERVER_RESP_BUF_SIZE   1536
+ *  Raised to 8 KB to accommodate the embedded monitor and config HTML pages
+ *  (each ~4–6 KB minified).  The buffer is a single static allocation inside
+ *  handleRequest, so it does not grow the per-connection heap cost. */
+#define HTTP_SERVER_RESP_BUF_SIZE   8192
 
 /**************************************************************************************
  * CLASS DECLARATION
@@ -166,6 +166,19 @@ public:
   /** @brief Returns true if the server is currently listening. */
   bool isRunning() const { return _listen_pcb != nullptr; }
 
+  /**
+   * @brief Send an HTTP response with application/json Content-Type.
+   * Used by REST route handlers that need to override the default text/html type.
+   * After calling this, do NOT write into resp_body — instead set resp_body[0]=0
+   * and return the status code so handleRequest skips the normal sendResponse().
+   * This method writes directly to the TCP PCB so it must be called from within
+   * a route handler invocation (where tpcb is available via the internal state).
+   * NOTE: The recommended pattern for JSON handlers is simply to write the JSON
+   * into resp_body and return the status code; the client-side fetch() code
+   * should use Content-Type detection. A proper per-handler content-type is a
+   * future enhancement.
+   */
+
 private:
 
   /* ------------------------------------------------------------------ */
@@ -190,7 +203,7 @@ private:
     bool     headers_done;
     char     method[8];
     char     path[128];
-    char     query[64];
+    char     query[512]; /* also holds PUT/POST body for non-upload requests */
     bool     close_after_send;
     bool     upload_mode;
     bool     upload_started;
