@@ -25,7 +25,15 @@ namespace TC6
  * CONSTANTS
  **************************************************************************************/
 
-static SPISettings const LAN865x_SPI_SETTING{16 * 1000 * 1000UL, MSBFIRST, SPI_MODE0};
+/* LAN8651 SPI clock.  16 MHz is the part's max, but on jumper-wired boards the
+ * footer parity can fail under sustained chunk bursts (large HTTP responses) →
+ * [TC6 ERR] BadChecksum → PHY reset.  Override from the build to trade speed for
+ * signal-integrity margin, e.g. -DLAN865X_SPI_CLOCK_HZ=8000000 (matches the
+ * board's CAN SPI cap). */
+#ifndef LAN865X_SPI_CLOCK_HZ
+#define LAN865X_SPI_CLOCK_HZ   (16 * 1000 * 1000UL)
+#endif
+static SPISettings const LAN865x_SPI_SETTING{LAN865X_SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0};
 
 /**************************************************************************************
  * STATIC MEMBER DEFINITION
