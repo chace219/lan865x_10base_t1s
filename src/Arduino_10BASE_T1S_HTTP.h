@@ -31,8 +31,13 @@
  * CONSTANTS
  **************************************************************************************/
 
-/** Maximum number of registered route handlers. */
-#define HTTP_SERVER_MAX_ROUTES      32
+/** Maximum number of registered route handlers.  Override from the build to fit
+ *  more endpoints — the consumer registers 16 (web UI + REST API + OTA), so it
+ *  sets -DHTTP_SERVER_MAX_ROUTES=24.  Excess registrations are dropped with a
+ *  "[HTTP] Route table full" message. */
+#ifndef HTTP_SERVER_MAX_ROUTES
+#define HTTP_SERVER_MAX_ROUTES      8
+#endif
 
 /** Maximum number of registered upload handlers (POST streaming). */
 #define HTTP_SERVER_MAX_UPLOAD_ROUTES 4
@@ -48,11 +53,22 @@
 #define HTTP_SERVER_REQ_BUF_SIZE    2048
 
 /** Response body buffer (bytes).
- *  Must be large enough for the longest handler response.
- *  Raised to 8 KB to accommodate the embedded monitor and config HTML pages
- *  (each ~4–6 KB minified).  The buffer is a single static allocation inside
- *  handleRequest, so it does not grow the per-connection heap cost. */
-#define HTTP_SERVER_RESP_BUF_SIZE   8192
+ *  Must be large enough for the longest handler response.  Override from the
+ *  build to fit larger pages — e.g. the consumer's embedded monitor/config
+ *  pages need -DHTTP_SERVER_RESP_BUF_SIZE=16384.  The buffer is static inside
+ *  handleRequest, not on the stack. */
+#ifndef HTTP_SERVER_RESP_BUF_SIZE
+#define HTTP_SERVER_RESP_BUF_SIZE   1536
+#endif
+
+/** Max response-body bytes queued to lwIP per send cycle.  The body is paced in
+ *  pieces this size, draining between each via the onSent() ACK callback, so a
+ *  large page is transmitted as many small SPI chunk bursts instead of one long
+ *  burst — the long burst overruns the MAC-PHY SPI link on marginal (jumper)
+ *  wiring and causes [TC6 ERR] BadChecksum.  Override from the build to tune. */
+#ifndef HTTP_SERVER_TX_CHUNK_MAX
+#define HTTP_SERVER_TX_CHUNK_MAX    1460
+#endif
 
 /**************************************************************************************
  * CLASS DECLARATION
@@ -203,13 +219,21 @@ private:
     bool     headers_done;
     char     method[8];
     char     path[128];
-    char     query[512]; /* also holds PUT/POST body for non-upload requests */
+    /* Holds the URL query string for GET, and for POST/PUT the URL query
+     * string followed by '&' and the request body (so handlers can find
+     * both the session token and the JSON payload in one strstr scan). */
+    char     query[512];
     bool     close_after_send;
     bool     upload_mode;
     bool     upload_started;
     uint32_t content_length;
     uint32_t body_received;
     UploadHandler upload_handler;
+    /* Outgoing-response state: bodies larger than tcp_sndbuf() are queued in
+     * chunks across successive onSent() callbacks (see pumpTx). */
+    const char* tx_body;       // remaining unsent body bytes (points into the static resp buffer)
+    uint32_t    tx_remaining;  // bytes of tx_body still to queue
+    bool        tx_half_close; // half-close TX once the whole body is queued
   };
 
   /* ------------------------------------------------------------------ */
@@ -233,9 +257,12 @@ private:
   void         handleRequest(struct tcp_pcb* tpcb, ConnState* state);
 
   static void  sendResponse(struct tcp_pcb* tpcb,
+                            ConnState*      state,
                             uint16_t        status_code,
                             const char*     status_text,
                             const char*     body);
+  /* Queue as much of state->tx_body as tcp_sndbuf() allows; resumed by onSent. */
+  static void  pumpTx(struct tcp_pcb* tpcb, ConnState* state);
   static void  closeConn(struct tcp_pcb* tpcb, ConnState* state);
 
   /* ------------------------------------------------------------------ */
