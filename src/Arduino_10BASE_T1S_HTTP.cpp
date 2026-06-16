@@ -248,13 +248,15 @@ void Arduino_10BASE_T1S_HTTP::handleRequest(struct tcp_pcb *tpcb, ConnState *sta
              state->path);
   }
 
-  sendResponse(tpcb, status_code, status_text, resp_body);
-  /* tcp_shutdown(tx) is called inside sendResponse — nothing else needed here. */
+  sendResponse(tpcb, state, status_code, status_text, resp_body);
+  /* The body may be queued across several onSent() callbacks; tcp_shutdown(tx)
+   * is issued by pumpTx() once the last chunk is queued. */
 }
 
 /* ---- Build and send the HTTP response ---------------------------------- */
 
 void Arduino_10BASE_T1S_HTTP::sendResponse(struct tcp_pcb *tpcb,
+                                           ConnState      *state,
                                            uint16_t        status_code,
                                            const char     *status_text,
                                            const char     *body)
@@ -272,20 +274,69 @@ void Arduino_10BASE_T1S_HTTP::sendResponse(struct tcp_pcb *tpcb,
     (unsigned)status_code, status_text,
     (unsigned)body_len);
 
-  if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(header_buf)) return;
-
-  tcp_write(tpcb, header_buf, (u16_t)hdr_len, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-  if (body_len > 0) {
-    tcp_write(tpcb, body, (u16_t)body_len, TCP_WRITE_FLAG_COPY);
+  if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(header_buf)) {
+    closeConn(tpcb, state);
+    return;
   }
+
+  /* The header is small and always fits in a fresh send buffer. */
+  if (tcp_write(tpcb, header_buf, (u16_t)hdr_len,
+                TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE) != ERR_OK) {
+    closeConn(tpcb, state);
+    return;
+  }
+
+  /* A response body can exceed tcp_sndbuf() (e.g. the ~13 KB monitor page vs an
+   * ~11 KB send buffer).  Writing it all in one tcp_write would fail with
+   * ERR_MEM and queue nothing, leaving the browser with a Content-Length that
+   * never arrives (ERR_CONTENT_LENGTH_MISMATCH).  Instead, record the body and
+   * queue it in sndbuf-sized chunks, resuming from onSent() as the peer ACKs.
+   * The source buffer is static and only one response is in flight at a time,
+   * so the pointer remains valid across callbacks. */
+  state->tx_body       = body;
+  state->tx_remaining  = (uint32_t)body_len;
+  state->tx_half_close = true;
+  pumpTx(tpcb, state);
+}
+
+/* Queue as much of the pending body as the send buffer currently allows.
+ * Called once from sendResponse() and again from onSent() each time the peer
+ * ACKs data and frees space, until the entire body has been handed to lwIP. */
+void Arduino_10BASE_T1S_HTTP::pumpTx(struct tcp_pcb *tpcb, ConnState *state)
+{
+  /* Pace the body: queue at most HTTP_SERVER_TX_CHUNK_MAX bytes per call, then
+   * return and let onSent() resume once the peer ACKs.  This keeps each SPI
+   * burst to the MAC-PHY small, avoiding the long burst that causes BadChecksum. */
+  uint32_t queued_this_call = 0;
+  while (state->tx_remaining > 0 && queued_this_call < HTTP_SERVER_TX_CHUNK_MAX) {
+    u16_t avail = tcp_sndbuf(tpcb);
+    if (avail == 0) break;                 /* no room now — resume on onSent */
+
+    uint32_t budget = (uint32_t)HTTP_SERVER_TX_CHUNK_MAX - queued_this_call;
+    uint32_t want   = state->tx_remaining < budget ? state->tx_remaining : budget;
+    u16_t    chunk  = (want < (uint32_t)avail) ? (u16_t)want : avail;
+    bool     more   = (state->tx_remaining - chunk) > 0;
+
+    err_t e = tcp_write(tpcb, state->tx_body, chunk,
+                        TCP_WRITE_FLAG_COPY | (more ? TCP_WRITE_FLAG_MORE : 0));
+    if (e == ERR_MEM) break;               /* transient — retry on onSent */
+    if (e != ERR_OK) { closeConn(tpcb, state); return; }
+
+    state->tx_body      += chunk;
+    state->tx_remaining -= chunk;
+    queued_this_call    += chunk;
+  }
+
   tcp_output(tpcb);
 
-  /* Half-close the TX direction after all data is queued.
-   * lwIP sends the FIN only after every queued byte has been transmitted
-   * and ACKed, so the response is guaranteed to be fully delivered before
-   * the connection tears down.  The browser closing its own side triggers
-   * onRecv(p==NULL) which calls closeConn() to free the PCB. */
-  tcp_shutdown(tpcb, 0 /* !shut_rx */, 1 /* shut_tx */);
+  /* Half-close TX only once every byte has been queued.  lwIP sends the FIN
+   * after all queued data is transmitted and ACKed, so the full response is
+   * guaranteed delivered; the browser closing its side then drives
+   * onRecv(p==NULL) → closeConn(). */
+  if (state->tx_remaining == 0 && state->tx_half_close) {
+    state->tx_half_close = false;
+    tcp_shutdown(tpcb, 0 /* !shut_rx */, 1 /* shut_tx */);
+  }
 }
 
 /* ---- Close a connection cleanly --------------------------------------- */
@@ -456,7 +507,7 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
        * of a silent timeout. */
       if (state->req_len >= (uint16_t)(HTTP_SERVER_REQ_BUF_SIZE - 1)) {
         Serial.println("[HTTP] 431 headers too large");
-        sendResponse(tpcb, 431, "Request Header Fields Too Large",
+        sendResponse(tpcb, state, 431, "Request Header Fields Too Large",
           "<html><body><h2>431 Request Header Fields Too Large</h2>"
           "<p>Recompile with a larger HTTP_SERVER_REQ_BUF_SIZE.</p></body></html>");
       }
@@ -503,6 +554,29 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
       memcpy(state->query, q + 1, query_len);
     }
     state->query[query_len] = '\0';
+
+    /* For POST/PUT, append the request body to the query field so handlers
+     * can find both the session token (URL query string) and the JSON
+     * payload (body) via a single strstr scan.  A '&' separator is inserted
+     * between the two parts when the URL already had a query string.
+     * Only bytes that arrived in this first segment are copied; for the
+     * small API payloads this project sends this is always the complete body. */
+    if (strcmp(state->method, "POST") == 0 || strcmp(state->method, "PUT") == 0) {
+      uint16_t header_end = (uint16_t)((end - state->req_buf) + terminator_len);
+      if (state->req_len > header_end) {
+        uint16_t body_bytes = (uint16_t)(state->req_len - header_end);
+        size_t   q_len      = strlen(state->query);
+        size_t   avail      = sizeof(state->query) - q_len - 1;
+        if (q_len > 0 && avail > 0) {
+          state->query[q_len++] = '&';
+          state->query[q_len]   = '\0';
+          avail--;
+        }
+        if (body_bytes > (uint16_t)avail) body_bytes = (uint16_t)avail;
+        memcpy(state->query + q_len, state->req_buf + header_end, body_bytes);
+        state->query[q_len + body_bytes] = '\0';
+      }
+    }
 
     state->content_length = parse_content_length(state->req_buf);
     state->upload_handler = state->server->findUploadHandler(state->path);
@@ -563,14 +637,19 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
   return ERR_OK;
 }
 
-/* Called after data we wrote has been acknowledged by the peer.
- * We use tcp_shutdown() to half-close TX after writing, so no action
- * is needed here — the connection tears down via onRecv(p==NULL). */
+/* Called after data we wrote has been acknowledged by the peer.  When a large
+ * response body is still being sent, the ACK has freed send-buffer space, so we
+ * queue the next chunk.  Once the whole body is queued, pumpTx() half-closes TX
+ * and the connection tears down via onRecv(p==NULL). */
 err_t Arduino_10BASE_T1S_HTTP::onSent(void *arg,
                                       struct tcp_pcb *tpcb,
                                       u16_t len)
 {
-  (void)arg; (void)tpcb; (void)len;
+  (void)len;
+  ConnState *state = static_cast<ConnState*>(arg);
+  if (state && state->tx_remaining > 0) {
+    pumpTx(tpcb, state);
+  }
   return ERR_OK;
 }
 
