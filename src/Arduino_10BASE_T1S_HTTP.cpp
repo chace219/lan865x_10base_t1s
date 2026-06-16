@@ -631,6 +631,24 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
     /* Dispatch to user handler. */
     Serial.print("[HTTP] "); Serial.print(state->method);
     Serial.print(" ");     Serial.println(state->path);
+
+    /* For PUT / POST (non-upload), copy the body into state->query so that
+     * RouteHandler implementations can read the JSON / form body via the
+     * query parameter.  The body starts right after the \r\n\r\n terminator. */
+    if (!state->upload_mode &&
+        (strcmp(state->method, "PUT") == 0 || strcmp(state->method, "POST") == 0))
+    {
+      uint16_t header_end = (uint16_t)((end - state->req_buf) + terminator_len);
+      if (state->req_len > header_end) {
+        uint16_t body_len = state->req_len - header_end;
+        uint16_t copy_len2 = body_len < (uint16_t)(sizeof(state->query) - 1)
+                             ? body_len
+                             : (uint16_t)(sizeof(state->query) - 1);
+        memcpy(state->query, state->req_buf + header_end, copy_len2);
+        state->query[copy_len2] = '\0';
+      }
+    }
+
     state->server->handleRequest(tpcb, state);
   }
 

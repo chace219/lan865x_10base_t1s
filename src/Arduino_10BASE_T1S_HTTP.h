@@ -182,6 +182,19 @@ public:
   /** @brief Returns true if the server is currently listening. */
   bool isRunning() const { return _listen_pcb != nullptr; }
 
+  /**
+   * @brief Send an HTTP response with application/json Content-Type.
+   * Used by REST route handlers that need to override the default text/html type.
+   * After calling this, do NOT write into resp_body — instead set resp_body[0]=0
+   * and return the status code so handleRequest skips the normal sendResponse().
+   * This method writes directly to the TCP PCB so it must be called from within
+   * a route handler invocation (where tpcb is available via the internal state).
+   * NOTE: The recommended pattern for JSON handlers is simply to write the JSON
+   * into resp_body and return the status code; the client-side fetch() code
+   * should use Content-Type detection. A proper per-handler content-type is a
+   * future enhancement.
+   */
+
 private:
 
   /* ------------------------------------------------------------------ */
