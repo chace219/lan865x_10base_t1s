@@ -550,6 +550,14 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
     memcpy(state->path, uri_start, path_len);
     state->path[path_len] = '\0';
 
+    /* Normalize a single trailing slash (e.g. "/update/bootloader/" ->
+     * "/update/bootloader") so exact-match routing in findHandler() /
+     * findUploadHandler() still matches a route registered without it.
+     * The root path "/" is left untouched. */
+    if (path_len > 1 && state->path[path_len - 1] == '/') {
+      state->path[--path_len] = '\0';
+    }
+
     if (q && query_len > 0) {
       memcpy(state->query, q + 1, query_len);
     }
