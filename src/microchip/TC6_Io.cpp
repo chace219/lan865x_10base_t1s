@@ -95,14 +95,20 @@ void TC6_Io::releaseInterrupt()
 
 bool TC6_Io::spiTransaction(uint8_t const *pTx, uint8_t *pRx, uint16_t const len)
 {
-  digitalWrite(_cs_pin, LOW);
+  /* CS must be asserted only INSIDE the transaction: beginTransaction() masks
+   * interrupts registered via SPI.usingInterrupt() (e.g. the MCP251863 CAN
+   * controller sharing this bus).  With CS asserted outside that window, a CAN
+   * ISR firing between digitalWrite(CS, LOW) and beginTransaction() — or after
+   * endTransaction() with CS still low — selects both slaves at once and
+   * corrupts the bus (MISO contention), which can wedge the ISR permanently. */
   _spi.beginTransaction(LAN865x_SPI_SETTING);
+  digitalWrite(_cs_pin, LOW);
 
   memcpy(pRx, pTx, len);
   _spi.transfer(pRx, len);
 
-  _spi.endTransaction();
   digitalWrite(_cs_pin, HIGH);
+  _spi.endTransaction();
 
   return true;
 }
