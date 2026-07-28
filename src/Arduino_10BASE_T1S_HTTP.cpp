@@ -391,7 +391,7 @@ err_t Arduino_10BASE_T1S_HTTP::onAccept(void *arg,
    * 2 s was too short and killed valid connections before data arrived. */
   tcp_poll(new_pcb, &Arduino_10BASE_T1S_HTTP::onPoll, 24);
 
-  Serial.println("[HTTP] Connection accepted");
+  HTTP_TRACE_PRINTLN("[HTTP] Connection accepted");
   return ERR_OK;
 }
 
@@ -431,7 +431,7 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
         state->upload_handler(info);
       }
     }
-    Serial.println("[HTTP] Peer closed — closing connection");
+    HTTP_TRACE_PRINTLN("[HTTP] Peer closed — closing connection");
     closeConn(tpcb, state);
     return ERR_OK;
   }
@@ -442,7 +442,7 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
     return err;
   }
 
-  Serial.print("[HTTP] RX data bytes="); Serial.println(p->tot_len);
+  HTTP_TRACE_PRINT("[HTTP] RX data bytes="); HTTP_TRACE_PRINTLN(p->tot_len);
 
   /* Acknowledge receipt immediately. */
   tcp_recved(tpcb, p->tot_len);
@@ -637,25 +637,13 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
     }
 
     /* Dispatch to user handler. */
-    Serial.print("[HTTP] "); Serial.print(state->method);
-    Serial.print(" ");     Serial.println(state->path);
+    HTTP_TRACE_PRINT("[HTTP] "); HTTP_TRACE_PRINT(state->method);
+    HTTP_TRACE_PRINT(" ");       HTTP_TRACE_PRINTLN(state->path);
 
-    /* For PUT / POST (non-upload), copy the body into state->query so that
-     * RouteHandler implementations can read the JSON / form body via the
-     * query parameter.  The body starts right after the \r\n\r\n terminator. */
-    if (!state->upload_mode &&
-        (strcmp(state->method, "PUT") == 0 || strcmp(state->method, "POST") == 0))
-    {
-      uint16_t header_end = (uint16_t)((end - state->req_buf) + terminator_len);
-      if (state->req_len > header_end) {
-        uint16_t body_len = state->req_len - header_end;
-        uint16_t copy_len2 = body_len < (uint16_t)(sizeof(state->query) - 1)
-                             ? body_len
-                             : (uint16_t)(sizeof(state->query) - 1);
-        memcpy(state->query, state->req_buf + header_end, copy_len2);
-        state->query[copy_len2] = '\0';
-      }
-    }
+    /* NOTE: the PUT/POST body was already appended to state->query above, after
+     * the URL query string ("token=...&{json}").  Do NOT copy it again here —
+     * overwriting state->query would drop the session token and make every
+     * authenticated PUT/POST fail with 401. */
 
     state->server->handleRequest(tpcb, state);
   }
