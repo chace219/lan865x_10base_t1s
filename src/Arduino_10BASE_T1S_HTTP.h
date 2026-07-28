@@ -42,6 +42,25 @@
 /** Maximum number of registered upload handlers (POST streaming). */
 #define HTTP_SERVER_MAX_UPLOAD_ROUTES 4
 
+/** Per-request tracing ("Connection accepted", "RX data bytes", "GET /path",
+ *  "Peer closed").  Off by default: these run inside the lwIP recv callback and
+ *  each line is a blocking USB-CDC write, which adds milliseconds of latency to
+ *  the very loop that must drain the MAC-PHY RX FIFO — a direct contributor to
+ *  [TC6 EVT] RX_Buffer_Overflow.  Build with -DHTTP_SERVER_DEBUG=1 to restore
+ *  them.  Error/lifecycle messages (bind/listen failures, 431, route table
+ *  full) are always printed. */
+#ifndef HTTP_SERVER_DEBUG
+#define HTTP_SERVER_DEBUG           0
+#endif
+
+#if HTTP_SERVER_DEBUG
+#define HTTP_TRACE_PRINT(x)         Serial.print(x)
+#define HTTP_TRACE_PRINTLN(x)       Serial.println(x)
+#else
+#define HTTP_TRACE_PRINT(x)         do { } while (0)
+#define HTTP_TRACE_PRINTLN(x)       do { } while (0)
+#endif
+
 /** TODO: It needs to adjust buffer size as fit 
  * to the actual request size and response, microcontroller platform */
 
