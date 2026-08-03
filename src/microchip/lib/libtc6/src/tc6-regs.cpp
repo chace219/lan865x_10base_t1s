@@ -35,6 +35,7 @@ Microchip or any third party.
 
 #include <stddef.h>
 #include <string.h>
+#include <Arduino.h>
 #include "../inc/tc6.h"
 #include "../cfg-example/tc6-conf.h"
 #include "../inc/tc6-regs.h"
@@ -460,6 +461,10 @@ static void OnReadId1(TC6_t *pInst, bool success, uint32_t addr, uint32_t value,
         uint32_t oui = value >> 10;
         uint32_t model = (value >> 4) & 0x3FFu;
         if ((0x1F0u != oui) || (0x1Bu != model)) {
+            Serial.print("[TC6] PHY ID reg raw=0x"); Serial.print(value, HEX);
+            Serial.print("  OUI=0x");   Serial.print(oui, HEX);
+            Serial.print(" (want 0x1F0)  model=0x"); Serial.print(model, HEX);
+            Serial.println(" (want 0x1B)");
             TC6Regs_CB_OnEvent(pInst, TC6Regs_Event_Unsupported_Hardware, pReg->pTag);
             pReg->initialized = false;
         }
@@ -477,6 +482,8 @@ static void OnReadId2(TC6_t *pInst, bool success, uint32_t addr, uint32_t value,
     if (success) {
         pReg->chipRev = (value & 0xFu);
         if (0u == pReg->chipRev) {
+            Serial.print("[TC6] PHY ID2 raw=0x"); Serial.print(value, HEX);
+            Serial.println("  chipRev=0 (rev A0 / unsupported silicon)");
             TC6Regs_CB_OnEvent(pInst, TC6Regs_Event_Unsupported_Hardware, pReg->pTag);
             pReg->initialized = false;
         }
