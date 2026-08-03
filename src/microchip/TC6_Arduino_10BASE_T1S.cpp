@@ -423,6 +423,15 @@ bool TC6_CB_OnSpiTransaction(TC6_t *pInst, uint8_t *pTx, uint8_t *pRx, uint16_t 
   return success;
 }
 
+/* ── TC6 health counters (exposed through GET /api/v1/t1s) ──────────────
+ * g_tc6_rx_frame_count / m_last_rx_deliver_ms give the RX path a POSITIVE
+ * liveness signal: "did a frame actually reach lwIP recently?".  Counting
+ * error events alone cannot distinguish a healthy-but-busy segment from a
+ * deaf receiver — this can. */
+uint32_t g_tc6_rx_frame_count       = 0;  /* frames handed to lwIP */
+uint32_t g_tc6_rx_latch_clear_count = 0;  /* rxInvalid latches cleared at frame start */
+static uint32_t m_last_rx_deliver_ms = 0;
+
 void TC6_CB_OnRxEthernetSlice(TC6_t *pInst, const uint8_t *pRx, uint16_t offset, uint16_t len, void *pGlobalTag)
 {
   TC6LwIP_t *lw = TC6::GetContextTC6(pInst);
@@ -430,17 +439,42 @@ void TC6_CB_OnRxEthernetSlice(TC6_t *pInst, const uint8_t *pRx, uint16_t offset,
   (void)pInst;
   (void)pGlobalTag;
 
-  /* If this is the start of a new frame (offset==0) and a pbuf is already
-   * held from a previous interrupted frame, free it before proceeding.
-   * Without this, a reinit mid-frame leaves a permanently stuck pbuf that
-   * causes every subsequent RX frame to be written into the wrong buffer
-   * and eventually exhausts MEM_SIZE. */
-  if (offset == 0 && lw->tc.pbuf != NULL)
+  /* A slice at offset 0 starts a NEW frame, so every scrap of per-frame state
+   * left over from the previous one must be dropped here — unconditionally.
+   *
+   * Freeing a still-held pbuf matters because a reinit mid-frame otherwise
+   * leaves a permanently stuck buffer that every subsequent frame is written
+   * into, eventually exhausting the heap.
+   *
+   * Clearing rxInvalid matters just as much, and used to be missed: it was
+   * only reset when a stale pbuf happened to be held.  But the common way to
+   * set rxInvalid is a FAILED pbuf_alloc below, which leaves pbuf == NULL —
+   * so the old guard did not fire.  The latch is otherwise only cleared by
+   * TC6_CB_OnRxEthernetPacket, and libtc6 skips that callback on most abort
+   * paths (SyncLost / BadChecksum / BadTxData / NoHardware in enqueue_rx_spi
+   * just reset their own offsets).  TC6Regs_Reinit() does not touch it either
+   * — it lives in this wrapper, not in the TC6_t instance.
+   *
+   * The result was a permanent one-way deafness: rxInvalid stuck true made
+   * every later slice fail, so no frame ever reached lwIP again, while TX
+   * kept working normally and the PHY's RX FIFO filled and overflowed on a
+   * loop.  That is the "coordinator healthy, node lost its IP, repeating
+   * RX_Buffer_Overflow" field failure. */
+  if (offset == 0)
   {
-    Serial.println("[TC6 RX] Stale pbuf detected at frame start — freeing");
-    pbuf_free(lw->tc.pbuf);
-    lw->tc.pbuf     = NULL;
-    lw->tc.rxLen    = 0;
+    if (lw->tc.pbuf != NULL)
+    {
+      Serial.println("[TC6 RX] Stale pbuf detected at frame start — freeing");
+      pbuf_free(lw->tc.pbuf);
+      lw->tc.pbuf = NULL;
+    }
+    else if (lw->tc.rxInvalid)
+    {
+      /* Latched with no pbuf — the deafness case.  Counted rather than
+       * printed: it can legitimately occur once per dropped frame. */
+      g_tc6_rx_latch_clear_count++;
+    }
+    lw->tc.rxLen     = 0;
     lw->tc.rxInvalid = false;
   }
 //  TC6_ASSERT(lw->tc.tc6 == pInst);
@@ -528,6 +562,10 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
      * The original FIXME "SOMETHING FISHY GOING ON" was exactly this. */
     lw->ip.netint.input(lw->tc.pbuf, &lw->ip.netint);
 
+    /* RX liveness: a frame genuinely reached the stack. */
+    g_tc6_rx_frame_count++;
+    m_last_rx_deliver_ms = millis();
+
     /* lwIP owns the pbuf now — clear our pointer. */
     lw->tc.pbuf     = NULL;
     lw->tc.rxLen    = 0;
@@ -550,8 +588,59 @@ void TC6_CB_OnRxEthernetPacket(TC6_t *pInst, bool success, uint16_t len, uint64_
 #define PRINT(...)
 
 /* Reinit counter — incremented every time TC6Regs_Reinit() is triggered.
- * Visible in the [MEM] diagnostic line in main.cpp. */
+ * Exposed (with g_tc6_rx_overflow_count) through GET /api/v1/t1s. */
 uint32_t g_tc6_reinit_count = 0;
+
+/* Lifetime RX_Buffer_Overflow event count. */
+uint32_t g_tc6_rx_overflow_count = 0;
+
+/* An RX_Buffer_Overflow proves inbound frames were arriving at the MAC-PHY
+ * and could not be buffered.  On a healthy node that is a transient burst and
+ * frames keep reaching lwIP throughout.  If instead NO frame has been
+ * delivered for TC6_RX_DEAF_TIMEOUT_MS while overflows keep firing, the
+ * receive path is genuinely deaf and will not recover on its own — escalate
+ * to a full reinit.
+ *
+ * Why liveness and not an overflow count: the field failure produced
+ * overflows spaced ~30 s apart (ambient periodic traffic dribbling into a
+ * dead FIFO), which no "N events inside a short window" rule would ever trip,
+ * while a busy-but-healthy segment can trip one harmlessly.  Time-since-last-
+ * delivered-frame separates the two exactly. */
+#ifndef TC6_RX_DEAF_TIMEOUT_MS
+#define TC6_RX_DEAF_TIMEOUT_MS  10000u
+#endif
+
+static bool rx_path_is_deaf()
+{
+  uint32_t const now = millis();
+  if (m_last_rx_deliver_ms == 0)
+  {
+    /* No frame delivered yet this boot — start the clock at the first
+     * overflow rather than treating uptime as deafness. */
+    m_last_rx_deliver_ms = now;
+    return false;
+  }
+  return (now - m_last_rx_deliver_ms) > TC6_RX_DEAF_TIMEOUT_MS;
+}
+
+/* Drop any half-assembled RX frame and clear the rxInvalid latch.  Called
+ * alongside every reinit: TC6Regs_Reinit() resets the TC6_t instance, but
+ * this wrapper's per-frame state lives outside it and would otherwise
+ * survive the reinit — including the latch that causes the deafness. */
+static void tc6_rx_state_reset(TC6_t *pInst)
+{
+  TC6LwIP_t *lw = TC6::GetContextTC6(pInst);
+  if (lw == nullptr)
+    return;
+  if (lw->tc.pbuf != NULL)
+  {
+    pbuf_free(lw->tc.pbuf);
+    lw->tc.pbuf = NULL;
+  }
+  lw->tc.rxLen         = 0;
+  lw->tc.rxInvalid     = false;
+  m_last_rx_deliver_ms = millis();  /* give the reinit a fresh grace period */
+}
 
 void TC6_CB_OnError(TC6_t *pInst, TC6_Error_t err, void *pGlobalTag)
 {
@@ -589,6 +678,7 @@ void TC6_CB_OnError(TC6_t *pInst, TC6_Error_t err, void *pGlobalTag)
   if (reinit)
   {
     g_tc6_reinit_count++;
+    tc6_rx_state_reset(pInst);
     TC6Regs_Reinit(pInst);
   }
 }
@@ -607,7 +697,15 @@ void TC6Regs_CB_OnEvent(TC6_t *pInst, TC6Regs_Event_t event, void *pTag)
     case TC6Regs_Event_Transmit_Buffer_Underflow_Error:
       Serial.println("[TC6 EVT] TX_Buffer_Underflow"); break;
     case TC6Regs_Event_Receive_Buffer_Overflow_Error:
-      Serial.println("[TC6 EVT] RX_Buffer_Overflow"); break;
+      g_tc6_rx_overflow_count++;
+      if (rx_path_is_deaf())
+      {
+        Serial.println("[TC6 EVT] RX_Buffer_Overflow with no RX traffic — path deaf, reinitialising");
+        reinit = true;
+      }
+      else
+        Serial.println("[TC6 EVT] RX_Buffer_Overflow");
+      break;
     case TC6Regs_Event_Loss_of_Framing_Error:
       Serial.println("[TC6 EVT] Loss_of_Framing — reinitialising");
       reinit = true; break;
@@ -644,6 +742,7 @@ void TC6Regs_CB_OnEvent(TC6_t *pInst, TC6Regs_Event_t event, void *pTag)
   if (reinit)
   {
     g_tc6_reinit_count++;
+    tc6_rx_state_reset(pInst);
     TC6Regs_Reinit(pInst);
   }
 }
