@@ -76,6 +76,16 @@ bool TC6_Io::begin()
   return true;
 }
 
+void TC6_Io::reset()
+{
+  /* Same pulse/settle timing as begin().  CS stays deselected throughout, so
+   * any other device sharing the SPI bus is untouched. */
+  digitalWrite(_reset_pin, LOW);
+  delay(100);
+  digitalWrite(_reset_pin, HIGH);
+  delay(100);
+}
+
 void TC6_Io::onInterrupt()
 {
   _int_in++;
@@ -96,11 +106,11 @@ void TC6_Io::releaseInterrupt()
 bool TC6_Io::spiTransaction(uint8_t const *pTx, uint8_t *pRx, uint16_t const len)
 {
   /* CS must be asserted only INSIDE the transaction: beginTransaction() masks
-   * interrupts registered via SPI.usingInterrupt() (e.g. the MCP251863 CAN
-   * controller sharing this bus).  With CS asserted outside that window, a CAN
-   * ISR firing between digitalWrite(CS, LOW) and beginTransaction() — or after
-   * endTransaction() with CS still low — selects both slaves at once and
-   * corrupts the bus (MISO contention), which can wedge the ISR permanently. */
+   * interrupts registered via SPI.usingInterrupt() by any other device sharing
+   * this bus.  With CS asserted outside that window, such an ISR firing between
+   * digitalWrite(CS, LOW) and beginTransaction() — or after endTransaction()
+   * with CS still low — selects both slaves at once and corrupts the bus (MISO
+   * contention), which can wedge the ISR permanently. */
   _spi.beginTransaction(LAN865x_SPI_SETTING);
   digitalWrite(_cs_pin, LOW);
 
