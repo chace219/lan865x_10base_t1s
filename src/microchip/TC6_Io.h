@@ -42,6 +42,11 @@ public:
 
   virtual bool begin();
 
+  /* Pulse the physical reset pin (same timing as begin()) — returns the
+   * LAN865x to its power-on register state.  Used by the stage-2 network
+   * recovery when soft resets (TC6Regs_Reinit) have proven insufficient. */
+  void reset();
+
   void onInterrupt();
 
   bool isInterruptActive();

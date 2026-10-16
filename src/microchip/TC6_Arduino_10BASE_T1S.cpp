@@ -642,6 +642,44 @@ static void tc6_rx_state_reset(TC6_t *pInst)
   m_last_rx_deliver_ms = millis();  /* give the reinit a fresh grace period */
 }
 
+/* Lifetime count of stage-2 hard resets, for application-side diagnostics. */
+uint32_t g_tc6_hard_reset_count = 0;
+
+/* Defined here (outside namespace TC6, qualified) so it can reach the
+ * file-level RX state helpers and health counters above. */
+bool TC6::TC6_Arduino_10BASE_T1S::hardReset()
+{
+  g_tc6_hard_reset_count++;
+
+  /* Drop the wrapper's per-frame RX state (held pbuf, rxInvalid latch) and
+   * grant the fresh chip a new deafness grace period. */
+  tc6_rx_state_reset(_lw.tc.tc6);
+
+  /* Physical RST pulse — power-on register state.  SPI transactions are
+   * synchronous, so nothing is in flight here. */
+  _tc6_io.reset();
+
+  /* Re-run the full register init with the parameters stored at begin():
+   * soft reset, MAC address, PLCA node ID/count re-enable, cut-through.
+   * DoInitialization() is self-pumping (drives TC6_Service internally) and
+   * runs to completion inside TC6Regs_CheckTimers(); a dead chip escapes the
+   * sequence via the NoHardware error path.  Bump the reinit counter FIRST so
+   * an application watching g_tc6_reinit_count re-kicks DHCP afterwards. */
+  g_tc6_reinit_count++;
+  TC6Regs_Reinit(_lw.tc.tc6);
+  TC6Regs_CheckTimers();
+
+  /* Give it a bounded window to report init-done rather than trusting the
+   * self-pumping loop unconditionally. */
+  uint32_t const start_ms = millis();
+  while (!TC6Regs_GetInitDone(_lw.tc.tc6) && (millis() - start_ms) < 3000u)
+  {
+    TC6_Service(_lw.tc.tc6, true);
+    TC6Regs_CheckTimers();
+  }
+  return TC6Regs_GetInitDone(_lw.tc.tc6);
+}
+
 void TC6_CB_OnError(TC6_t *pInst, TC6_Error_t err, void *pGlobalTag)
 {
   bool reinit = false;
