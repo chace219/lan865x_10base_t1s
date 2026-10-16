@@ -125,9 +125,8 @@
  * @param resp_body_len Size of resp_body buffer
  * @return HTTP status code to send (200, 404, 500, …)
  *
- * Content-Type is always "text/html; charset=utf-8".
- * For JSON, start the body with a recognisable prefix and the client can
- * detect it, or extend the class to carry a content-type out-param.
+ * Content-Type is "text/html; charset=utf-8" unless the handler calls
+ * setContentType() before returning.
  */
 class Arduino_10BASE_T1S_HTTP
 {
@@ -202,17 +201,12 @@ public:
   bool isRunning() const { return _listen_pcb != nullptr; }
 
   /**
-   * @brief Send an HTTP response with application/json Content-Type.
-   * Used by REST route handlers that need to override the default text/html type.
-   * After calling this, do NOT write into resp_body — instead set resp_body[0]=0
-   * and return the status code so handleRequest skips the normal sendResponse().
-   * This method writes directly to the TCP PCB so it must be called from within
-   * a route handler invocation (where tpcb is available via the internal state).
-   * NOTE: The recommended pattern for JSON handlers is simply to write the JSON
-   * into resp_body and return the status code; the client-side fetch() code
-   * should use Content-Type detection. A proper per-handler content-type is a
-   * future enhancement.
+   * @brief Set the Content-Type of the response being built.
+   * Call from inside a route handler; it applies to that one response and
+   * resets to text/html for the next.  The string must outlive the handler
+   * call (a literal is the normal case).
    */
+  void setContentType(const char* content_type) { _content_type = content_type; }
 
 private:
 
@@ -266,6 +260,7 @@ private:
   uint8_t      _route_count;
   uint8_t      _upload_route_count;
   RouteHandler _not_found_handler;
+  const char*  _content_type = nullptr; /* this response only; nullptr = text/html */
 
   /* ------------------------------------------------------------------ */
   /* Private helpers                                                      */
@@ -279,7 +274,8 @@ private:
                             ConnState*      state,
                             uint16_t        status_code,
                             const char*     status_text,
-                            const char*     body);
+                            const char*     body,
+                            const char*     content_type = nullptr);
   /* Queue as much of state->tx_body as tcp_sndbuf() allows; resumed by onSent. */
   static void  pumpTx(struct tcp_pcb* tpcb, ConnState* state);
   static void  closeConn(struct tcp_pcb* tpcb, ConnState* state);

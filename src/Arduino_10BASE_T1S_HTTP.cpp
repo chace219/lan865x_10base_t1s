@@ -220,35 +220,37 @@ void Arduino_10BASE_T1S_HTTP::handleRequest(struct tcp_pcb *tpcb, ConnState *sta
   resp_body[0] = '\0';
 
   RouteHandler handler = findHandler(state->path);
-  uint16_t     status_code  = 200;
-  const char  *status_text  = "OK";
+  if (!handler) handler = _not_found_handler;
+  uint16_t     status_code  = 404;
+  _content_type = nullptr;
 
   if (handler) {
+    /* The catch-all's status is whatever it returns, not an implied 404. */
     status_code = handler(state->method, state->path, state->query,
                           resp_body, sizeof(resp_body));
-    switch (status_code) {
-      case 200: status_text = "OK";                    break;
-      case 201: status_text = "Created";               break;
-      case 204: status_text = "No Content";            break;
-      case 400: status_text = "Bad Request";           break;
-      case 403: status_text = "Forbidden";             break;
-      case 404: status_text = "Not Found";             break;
-      case 500: status_text = "Internal Server Error"; break;
-      default:  status_text = "OK";                    break;
-    }
-  } else if (_not_found_handler) {
-    status_code = _not_found_handler(state->method, state->path, state->query,
-                                     resp_body, sizeof(resp_body));
-    status_text = "Not Found";
   } else {
-    status_code = 404;
-    status_text = "Not Found";
     snprintf(resp_body, sizeof(resp_body),
              "<html><body><h2>404 Not Found</h2><p>%s</p></body></html>",
              state->path);
   }
 
-  sendResponse(tpcb, state, status_code, status_text, resp_body);
+  const char *status_text;
+  switch (status_code) {
+    case 200: status_text = "OK";                    break;
+    case 201: status_text = "Created";               break;
+    case 204: status_text = "No Content";            break;
+    case 400: status_text = "Bad Request";           break;
+    case 401: status_text = "Unauthorized";          break;
+    case 403: status_text = "Forbidden";             break;
+    case 404: status_text = "Not Found";             break;
+    case 405: status_text = "Method Not Allowed";    break;
+    case 413: status_text = "Payload Too Large";     break;
+    case 500: status_text = "Internal Server Error"; break;
+    case 503: status_text = "Service Unavailable";   break;
+    default:  status_text = "OK";                    break;
+  }
+
+  sendResponse(tpcb, state, status_code, status_text, resp_body, _content_type);
   /* The body may be queued across several onSent() callbacks; tcp_shutdown(tx)
    * is issued by pumpTx() once the last chunk is queued. */
 }
@@ -259,19 +261,21 @@ void Arduino_10BASE_T1S_HTTP::sendResponse(struct tcp_pcb *tpcb,
                                            ConnState      *state,
                                            uint16_t        status_code,
                                            const char     *status_text,
-                                           const char     *body)
+                                           const char     *body,
+                                           const char     *content_type)
 {
   static char header_buf[256];
   size_t body_len = strlen(body);
 
   int hdr_len = snprintf(header_buf, sizeof(header_buf),
     "HTTP/1.0 %u %s\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
+    "Content-Type: %s\r\n"
     "Content-Length: %u\r\n"
     "Connection: close\r\n"
     "Cache-Control: no-store\r\n"
     "\r\n",
     (unsigned)status_code, status_text,
+    content_type ? content_type : "text/html; charset=utf-8",
     (unsigned)body_len);
 
   if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(header_buf)) {
