@@ -24,6 +24,12 @@
  * INTERNAL HELPERS
  **************************************************************************************/
 
+/* The connection whose response body is still being queued out of handleRequest()'s one
+ * static buffer.  A second request handled meanwhile would overwrite that buffer and the
+ * first connection would send the wrong bytes, so onRecv() holds every other
+ * connection's data back until this is null again. */
+static const void *s_tx_owner = nullptr; /* a ConnState*, which is private to the class */
+
 /** Safely find the first occurrence of needle in the first haystack_len bytes. */
 static const char * mem_find(const char *haystack, uint16_t haystack_len,
                              const char *needle,   uint16_t needle_len)
@@ -295,11 +301,12 @@ void Arduino_10BASE_T1S_HTTP::sendResponse(struct tcp_pcb *tpcb,
    * ERR_MEM and queue nothing, leaving the browser with a Content-Length that
    * never arrives (ERR_CONTENT_LENGTH_MISMATCH).  Instead, record the body and
    * queue it in sndbuf-sized chunks, resuming from onSent() as the peer ACKs.
-   * The source buffer is static and only one response is in flight at a time,
-   * so the pointer remains valid across callbacks. */
+   * The source buffer is static; s_tx_owner keeps every other request waiting until
+   * the whole body has been queued, so the pointer remains valid across callbacks. */
   state->tx_body       = body;
   state->tx_remaining  = (uint32_t)body_len;
   state->tx_half_close = true;
+  s_tx_owner           = state;
   pumpTx(tpcb, state);
 }
 
@@ -333,6 +340,11 @@ void Arduino_10BASE_T1S_HTTP::pumpTx(struct tcp_pcb *tpcb, ConnState *state)
 
   tcp_output(tpcb);
 
+  /* Every byte is now lwIP's own copy: the static buffer is free for the next request. */
+  if (state->tx_remaining == 0 && s_tx_owner == state) {
+    s_tx_owner = nullptr;
+  }
+
   /* Half-close TX only once every byte has been queued.  lwIP sends the FIN
    * after all queued data is transmitted and ACKed, so the full response is
    * guaranteed delivered; the browser closing its side then drives
@@ -352,6 +364,7 @@ void Arduino_10BASE_T1S_HTTP::closeConn(struct tcp_pcb *tpcb, ConnState *state)
   tcp_sent(tpcb, nullptr);
   tcp_err (tpcb, nullptr);
   tcp_poll(tpcb, nullptr, 0);
+  if (state == s_tx_owner) s_tx_owner = nullptr;
   if (state) delete state;
   tcp_close(tpcb);
 }
@@ -444,6 +457,12 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
     pbuf_free(p);
     closeConn(tpcb, state);
     return err;
+  }
+
+  /* Another connection's response is still leaving the shared buffer.  Not ERR_OK makes
+   * lwIP keep this pbuf as refused data and offer it again on its next fast timer. */
+  if (s_tx_owner != nullptr && s_tx_owner != state) {
+    return ERR_MEM;
   }
 
   HTTP_TRACE_PRINT("[HTTP] RX data bytes="); HTTP_TRACE_PRINTLN(p->tot_len);
@@ -677,6 +696,7 @@ void Arduino_10BASE_T1S_HTTP::onError(void *arg, err_t err)
   (void)err;
   ConnState *state = static_cast<ConnState*>(arg);
   /* The PCB is already freed by lwIP before this callback — only free state. */
+  if (state == s_tx_owner) s_tx_owner = nullptr;
   if (state) delete state;
 }
 
