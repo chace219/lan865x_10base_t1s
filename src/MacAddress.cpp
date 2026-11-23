@@ -103,11 +103,16 @@ void get_unique_chip_id_3(uint8_t * uid)
 #elif defined(ARDUINO_ARCH_RP2040)
   {
     /* RP2040 exposes a 64-bit unique board ID derived from the flash chip's
-     * unique serial number.  Use the first 3 bytes as the NIC-specific part
-     * of the MAC address. */
+     * unique serial number.  Its leading bytes are a manufacturer/lot prefix
+     * shared by all chips from the same batch (e.g. E6 64 88 ...), so taking
+     * them verbatim yields identical MACs across boards.  Fold all 8 bytes
+     * into the 3 NIC-specific bytes instead, so the batch-varying tail of the
+     * serial always contributes. */
     pico_unique_board_id_t board_id;
     pico_get_unique_board_id(&board_id);
-    memcpy(uid, board_id.id, 3);
+    uid[0] = board_id.id[0] ^ board_id.id[3] ^ board_id.id[6];
+    uid[1] = board_id.id[1] ^ board_id.id[4] ^ board_id.id[7];
+    uid[2] = board_id.id[2] ^ board_id.id[5];
   }
 #else
 # warning "Retrieving a unique chip ID for MAC generation is not supported on this platform."

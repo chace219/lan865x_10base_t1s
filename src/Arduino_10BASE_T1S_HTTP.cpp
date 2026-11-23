@@ -24,6 +24,12 @@
  * INTERNAL HELPERS
  **************************************************************************************/
 
+/* The connection whose response body is still being queued out of handleRequest()'s one
+ * static buffer.  A second request handled meanwhile would overwrite that buffer and the
+ * first connection would send the wrong bytes, so onRecv() holds every other
+ * connection's data back until this is null again. */
+static const void *s_tx_owner = nullptr; /* a ConnState*, which is private to the class */
+
 /** Safely find the first occurrence of needle in the first haystack_len bytes. */
 static const char * mem_find(const char *haystack, uint16_t haystack_len,
                              const char *needle,   uint16_t needle_len)
@@ -220,35 +226,37 @@ void Arduino_10BASE_T1S_HTTP::handleRequest(struct tcp_pcb *tpcb, ConnState *sta
   resp_body[0] = '\0';
 
   RouteHandler handler = findHandler(state->path);
-  uint16_t     status_code  = 200;
-  const char  *status_text  = "OK";
+  if (!handler) handler = _not_found_handler;
+  uint16_t     status_code  = 404;
+  _content_type = nullptr;
 
   if (handler) {
+    /* The catch-all's status is whatever it returns, not an implied 404. */
     status_code = handler(state->method, state->path, state->query,
                           resp_body, sizeof(resp_body));
-    switch (status_code) {
-      case 200: status_text = "OK";                    break;
-      case 201: status_text = "Created";               break;
-      case 204: status_text = "No Content";            break;
-      case 400: status_text = "Bad Request";           break;
-      case 403: status_text = "Forbidden";             break;
-      case 404: status_text = "Not Found";             break;
-      case 500: status_text = "Internal Server Error"; break;
-      default:  status_text = "OK";                    break;
-    }
-  } else if (_not_found_handler) {
-    status_code = _not_found_handler(state->method, state->path, state->query,
-                                     resp_body, sizeof(resp_body));
-    status_text = "Not Found";
   } else {
-    status_code = 404;
-    status_text = "Not Found";
     snprintf(resp_body, sizeof(resp_body),
              "<html><body><h2>404 Not Found</h2><p>%s</p></body></html>",
              state->path);
   }
 
-  sendResponse(tpcb, state, status_code, status_text, resp_body);
+  const char *status_text;
+  switch (status_code) {
+    case 200: status_text = "OK";                    break;
+    case 201: status_text = "Created";               break;
+    case 204: status_text = "No Content";            break;
+    case 400: status_text = "Bad Request";           break;
+    case 401: status_text = "Unauthorized";          break;
+    case 403: status_text = "Forbidden";             break;
+    case 404: status_text = "Not Found";             break;
+    case 405: status_text = "Method Not Allowed";    break;
+    case 413: status_text = "Payload Too Large";     break;
+    case 500: status_text = "Internal Server Error"; break;
+    case 503: status_text = "Service Unavailable";   break;
+    default:  status_text = "OK";                    break;
+  }
+
+  sendResponse(tpcb, state, status_code, status_text, resp_body, _content_type);
   /* The body may be queued across several onSent() callbacks; tcp_shutdown(tx)
    * is issued by pumpTx() once the last chunk is queued. */
 }
@@ -259,19 +267,21 @@ void Arduino_10BASE_T1S_HTTP::sendResponse(struct tcp_pcb *tpcb,
                                            ConnState      *state,
                                            uint16_t        status_code,
                                            const char     *status_text,
-                                           const char     *body)
+                                           const char     *body,
+                                           const char     *content_type)
 {
   static char header_buf[256];
   size_t body_len = strlen(body);
 
   int hdr_len = snprintf(header_buf, sizeof(header_buf),
     "HTTP/1.0 %u %s\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
+    "Content-Type: %s\r\n"
     "Content-Length: %u\r\n"
     "Connection: close\r\n"
     "Cache-Control: no-store\r\n"
     "\r\n",
     (unsigned)status_code, status_text,
+    content_type ? content_type : "text/html; charset=utf-8",
     (unsigned)body_len);
 
   if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(header_buf)) {
@@ -291,11 +301,12 @@ void Arduino_10BASE_T1S_HTTP::sendResponse(struct tcp_pcb *tpcb,
    * ERR_MEM and queue nothing, leaving the browser with a Content-Length that
    * never arrives (ERR_CONTENT_LENGTH_MISMATCH).  Instead, record the body and
    * queue it in sndbuf-sized chunks, resuming from onSent() as the peer ACKs.
-   * The source buffer is static and only one response is in flight at a time,
-   * so the pointer remains valid across callbacks. */
+   * The source buffer is static; s_tx_owner keeps every other request waiting until
+   * the whole body has been queued, so the pointer remains valid across callbacks. */
   state->tx_body       = body;
   state->tx_remaining  = (uint32_t)body_len;
   state->tx_half_close = true;
+  s_tx_owner           = state;
   pumpTx(tpcb, state);
 }
 
@@ -329,6 +340,11 @@ void Arduino_10BASE_T1S_HTTP::pumpTx(struct tcp_pcb *tpcb, ConnState *state)
 
   tcp_output(tpcb);
 
+  /* Every byte is now lwIP's own copy: the static buffer is free for the next request. */
+  if (state->tx_remaining == 0 && s_tx_owner == state) {
+    s_tx_owner = nullptr;
+  }
+
   /* Half-close TX only once every byte has been queued.  lwIP sends the FIN
    * after all queued data is transmitted and ACKed, so the full response is
    * guaranteed delivered; the browser closing its side then drives
@@ -348,6 +364,7 @@ void Arduino_10BASE_T1S_HTTP::closeConn(struct tcp_pcb *tpcb, ConnState *state)
   tcp_sent(tpcb, nullptr);
   tcp_err (tpcb, nullptr);
   tcp_poll(tpcb, nullptr, 0);
+  if (state == s_tx_owner) s_tx_owner = nullptr;
   if (state) delete state;
   tcp_close(tpcb);
 }
@@ -440,6 +457,12 @@ err_t Arduino_10BASE_T1S_HTTP::onRecv(void *arg,
     pbuf_free(p);
     closeConn(tpcb, state);
     return err;
+  }
+
+  /* Another connection's response is still leaving the shared buffer.  Not ERR_OK makes
+   * lwIP keep this pbuf as refused data and offer it again on its next fast timer. */
+  if (s_tx_owner != nullptr && s_tx_owner != state) {
+    return ERR_MEM;
   }
 
   HTTP_TRACE_PRINT("[HTTP] RX data bytes="); HTTP_TRACE_PRINTLN(p->tot_len);
@@ -673,6 +696,7 @@ void Arduino_10BASE_T1S_HTTP::onError(void *arg, err_t err)
   (void)err;
   ConnState *state = static_cast<ConnState*>(arg);
   /* The PCB is already freed by lwIP before this callback — only free state. */
+  if (state == s_tx_owner) s_tx_owner = nullptr;
   if (state) delete state;
 }
 

@@ -209,6 +209,25 @@ public:
    */
   void restartDhcp();
 
+  /**
+   * @brief Stage-2 recovery: physical RST-pin reset of the LAN865x followed
+   *        by a full register re-initialisation (including PLCA re-enable).
+   *
+   * Deeper than the driver's own TC6Regs_Reinit() escalation (stage 1), which
+   * only issues a register-level soft reset — a wedged SPI/MAC state that no
+   * longer honours register writes survives that, but not a power-on-
+   * equivalent pin reset.  The lwIP netif is untouched; the caller re-kicks
+   * DHCP as needed (g_tc6_reinit_count is bumped so the usual reinit watcher
+   * fires).
+   *
+   * Blocking: ~200 ms reset pulse + the register init sequence.  Call from
+   * loop() context only, never from an ISR — it drives synchronous SPI
+   * transactions and must not overlap other users of the bus.
+   *
+   * @return true when the chip answered and the register init completed.
+   */
+  bool hardReset();
+
 private:
   TC6_Io & _tc6_io;
   TC6LwIP_t _lw;
