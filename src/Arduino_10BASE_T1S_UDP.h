@@ -241,6 +241,8 @@ public:
 
   bool joinMulticast(IPAddress const group_ip);
   bool leaveMulticast(IPAddress const group_ip);
+  /** lwIP netif index multicast leaves on; NETIF_NO_INDEX routes it to the default netif. */
+  void setMulticastNetif(uint8_t const netif_idx) { if (_udp_pcb) udp_set_multicast_netif_index(_udp_pcb, netif_idx); }
 
   /* This function MUST not be called from the user of this library,
    * it's used for internal purposes only.
